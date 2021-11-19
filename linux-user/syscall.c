@@ -8070,7 +8070,16 @@ static target_timer_t get_timer_id(abi_long arg)
     return timerid;
 }
 
+#if defined(TARGET_ARM) || defined(TARGET_AARCH64)
+
 #define BINPRM_BUF_SIZE 128
+
+#if defined(TARGET_AARCH64)
+    #define QEMU_TARGET_PATH "/usr/bin/qemu-aarch64-static"
+#elif defined(TARGET_ARM)
+    #define QEMU_TARGET_PATH "/usr/bin/qemu-arm-static"
+#endif
+
 
 /* qemu_execve() Must return target values and target errnos. */
 static abi_long qemu_execve(char *filename, char *argv[],
@@ -8140,7 +8149,7 @@ static abi_long qemu_execve(char *filename, char *argv[],
     for (i = 0; i < argc; i++)
         new_argp[i + offset] = argv[i];
 
-    new_argp[0] = strdup("/usr/bin/qemu-arm-static");
+    new_argp[0] = strdup(QEMU_TARGET_PATH);
     new_argp[1] = strdup("-0");
     new_argp[offset] = filename;
     new_argp[argc + offset] = NULL;
@@ -8155,8 +8164,10 @@ static abi_long qemu_execve(char *filename, char *argv[],
         new_argp[2] = argv[0];
     }
 
-    return get_errno(safe_execve("/usr/bin/qemu-arm-static", new_argp, envp));
+    	return get_errno(safe_execve(QEMU_TARGET_PATH, new_argp, envp));
 }
+
+#endif
 
 static int target_to_host_cpu_mask(unsigned long *host_mask,
                                    size_t host_size,
@@ -8519,8 +8530,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
              * program's problem.
 	     * This is done in qemu_exec
              */
-
-            ret = get_errno(qemu_execve(p, argp, envp));
+            #if defined(TARGET_ARM) || defined(TARGET_AARCH64)
+                ret = get_errno(qemu_execve(p, argp, envp));
+            #else
+		ret = get_errno(safe_execve(p, argp, envp));
+            #endif
             unlock_user(p, arg1, 0);
 
             goto execve_end;
