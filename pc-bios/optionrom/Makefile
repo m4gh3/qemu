@@ -14,13 +14,19 @@ cc-option = $(if $(shell $(CC) $1 -c -o /dev/null -xc /dev/null >/dev/null 2>&1 
 
 override CFLAGS += -march=i486 -Wall
 
+# If -fcf-protection is enabled in flags or compiler defaults that will
+# conflict with -march=i486
+override CFLAGS += $(call cc-option, -fcf-protection=none)
+
 # Flags for dependency generation
 override CPPFLAGS += -MMD -MP -MT $@ -MF $(@D)/$(*F).d
 
 override CFLAGS += $(filter -W%, $(QEMU_CFLAGS))
-override CFLAGS += $(CFLAGS_NOPIE) -ffreestanding -I$(TOPSRC_DIR)/include
+override CFLAGS += $(call cc-option, -fno-pie)
+override CFLAGS += -ffreestanding -I$(TOPSRC_DIR)/include
 override CFLAGS += $(call cc-option, -fno-stack-protector)
 override CFLAGS += $(call cc-option, -m16)
+override CFLAGS += $(call cc-option, -Wno-array-bounds)
 
 ifeq ($(filter -m16, $(CFLAGS)),)
 # Attempt to work around compilers that lack -m16 (GCC <= 4.8, clang <= ??)
