@@ -8302,7 +8302,7 @@ static target_timer_t get_timer_id(abi_long arg)
 
 #if defined(TARGET_ARM) || defined(TARGET_AARCH64)
 
-#define BINPRM_BUF_SIZE 128
+#define BINPRM_BUF_SIZE 512
 
 #if defined(TARGET_AARCH64)
     #define QEMU_TARGET_PATH "/usr/bin/qemu-aarch64-static"
@@ -8327,7 +8327,7 @@ static abi_long qemu_execve(char *filename, char *argv[],
     if (fd == -1)
         return -ENOENT;
 
-    ret = read(fd, buf, BINPRM_BUF_SIZE);
+    ret = read(fd, buf, BINPRM_BUF_SIZE-1);
     if (ret == -1) {
         close(fd);
         return -ENOENT;
@@ -8335,6 +8335,59 @@ static abi_long qemu_execve(char *filename, char *argv[],
 
     close(fd);
 
+    /* if file too small can't even be an executable script! */
+    if( ret < 2 )
+	    return -ENOEXEC;
+
+    /* added feature: qbang */
+    if((buf[0] == '#') && (buf[1] == '?'))
+    {
+
+	buf[ret] = '\0';
+	int arg_cout = 1, state = 2;
+	char arg_buf[BINPRM_BUF_SIZE];
+	
+	for(int i=2,j=0; state; i++ ) {
+		if(state == 1) {
+				arg_buf[j++] = buf[i];
+				state = 2;
+		}
+		else {
+			switch(buf[i]) {
+				case 0:
+					state = 0;
+					arg_buf[j++] = 0;
+					break;
+				case ' ':
+					arg_buf[j++] = 0;
+					arg_count++;	
+					break;
+				case '\\':
+					state = 1;
+					break;
+				default:
+					arg_buf[j++] = buf[i];
+			}
+		}
+	}
+
+	new_argp = alloca((arg_count+argc) * sizeof(void *));
+	new_argp[0] = arg_buf;
+	new_argp[arg_count+argc] = NULL;
+
+	for(int i=1,j=0; i < arg_count; j++) {
+		if(!arg_buf[j])
+			new_argp[i++] = arg_buf+j+1;
+	}
+	for (int i = 1; i < argc; i++)
+        		new_argp[i + arg_count - 1] = argv[i];
+
+	/*for(int i=0; i < arg_count + argc - 2; i++ )
+		printf("new_argv[%d]: %s\n", i, new_argv[i] );*/
+
+	return get_errno(safe_execve(new_argp[0], new_argp+1, envp));
+
+    }
     /* adapted from the kernel
      * https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/fs/binfmt_script.c
      */
@@ -8344,7 +8397,7 @@ static abi_long qemu_execve(char *filename, char *argv[],
          * Sorta complicated, but hopefully it will work.  -TYT
          */
 
-        buf[BINPRM_BUF_SIZE - 1] = '\0';
+        buf[ret] = '\0';
         if ((cp = strchr(buf, '\n')) == NULL)
             cp = buf+BINPRM_BUF_SIZE-1;
         *cp = '\0';
