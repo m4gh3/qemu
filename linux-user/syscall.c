@@ -8385,7 +8385,7 @@ static abi_long qemu_execve(char *filename, char *argv[],
 	/*for(int i=0; i < arg_count + argc - 2; i++ )
 		printf("new_argv[%d]: %s\n", i, new_argv[i] );*/
 
-	return get_errno(safe_execve(new_argp[0], new_argp+1, envp));
+	return get_errno(safe_execve(new_argp[0], new_argp, envp));
 
     }
     /* adapted from the kernel
