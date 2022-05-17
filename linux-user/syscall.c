@@ -8344,7 +8344,7 @@ static abi_long qemu_execve(char *filename, char *argv[],
     {
 
 	buf[ret] = '\0';
-	int arg_cout = 1, state = 2;
+	int arg_count = 1, state = 2;
 	char arg_buf[BINPRM_BUF_SIZE];
 	
 	for(int i=2,j=0; state; i++ ) {
