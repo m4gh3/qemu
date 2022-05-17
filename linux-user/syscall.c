@@ -8371,9 +8371,9 @@ static abi_long qemu_execve(char *filename, char *argv[],
 		}
 	}
 
-	new_argp = alloca((arg_count+argc) * sizeof(void *));
+	new_argp = alloca((arg_count+argc-1) * sizeof(void *));
 	new_argp[0] = arg_buf;
-	new_argp[arg_count+argc] = NULL;
+	new_argp[arg_count+argc-1] = NULL;
 
 	for(int i=1,j=0; i < arg_count; j++) {
 		if(!arg_buf[j])
