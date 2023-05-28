@@ -22,22 +22,21 @@ jobs:
               ./configure \
               --prefix=$(pwd)/prefix \
               --static \
-              --disable-system \
-              --enable-linux-user
+              --target-list="aarch64-linux-user arm-linux-user"
       - name: build qemu
         run: |
-          make
+          make -j8
           make install
       - name: upload QEMU CI CD binaries to release
         run: |
           ID=$(jq --raw-output '.release.id' $GITHUB_EVENT_PATH)
           AUTH_HEADER="Authorization: token ${{ secrets.GITHUB_TOKEN }}"
-          CONTENT_LENGTH="Content-Length: $(stat -c%s prefix/qemu-aarch64)"
+          CONTENT_LENGTH="Content-Length: $(stat -c%s prefix/bin/qemu-aarch64)"
           CONTENT_TYPE="Content-Type:  application/x-elf"
           UPLOAD_URL="https://uploads.github.com/repos/${{ github.repository }}/releases/$ID/assets?name=qemu-aarch64-static"
-          curl -XPOST -H "$AUTH_HEADER" -H "$CONTENT_LENGTH" -H "$CONTENT_TYPE" --upload-file "prefix/qemu-aarch64" "$UPLOAD_URL"
-          CONTENT_LENGTH="Content-Length: $(stat -c%s prefix/qemu-arm)"
+          curl -XPOST -H "$AUTH_HEADER" -H "$CONTENT_LENGTH" -H "$CONTENT_TYPE" --upload-file "prefix/bin/qemu-aarch64" "$UPLOAD_URL"
+          CONTENT_LENGTH="Content-Length: $(stat -c%s prefix/bin/qemu-arm)"
           CONTENT_TYPE="Content-Type:  application/x-elf"
           UPLOAD_URL="https://uploads.github.com/repos/${{ github.repository }}/releases/$ID/assets?name=qemu-arm-static"
-          curl -XPOST -H "$AUTH_HEADER" -H "$CONTENT_LENGTH" -H "$CONTENT_TYPE" --upload-file "prefix/qemu-arm" "$UPLOAD_URL"
+          curl -XPOST -H "$AUTH_HEADER" -H "$CONTENT_LENGTH" -H "$CONTENT_TYPE" --upload-file "prefix/bin/qemu-arm" "$UPLOAD_URL"
       - run: echo "🍏 This job's status is ${{ job.status }}."
