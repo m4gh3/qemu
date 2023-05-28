@@ -13,7 +13,7 @@
 #define HW_VFIO_VFIO_PCI_H
 
 #include "exec/memory.h"
-#include "hw/pci/pci.h"
+#include "hw/pci/pci_device.h"
 #include "hw/vfio/vfio-common.h"
 #include "qemu/event_notifier.h"
 #include "qemu/queue.h"
@@ -137,6 +137,7 @@ struct VFIOPCIDevice {
     VFIOVGA *vga; /* 0xa0000, 0x3b0, 0x3c0 */
     void *igd_opregion;
     PCIHostDeviceAddress host;
+    QemuUUID vf_token;
     EventNotifier err_notifier;
     EventNotifier req_notifier;
     int (*resetfn)(struct VFIOPCIDevice *);

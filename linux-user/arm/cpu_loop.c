@@ -356,7 +356,7 @@ void cpu_loop(CPUARMState *env)
             break;
         case EXCP_SWI:
             {
-                env->eabi = 1;
+                env->eabi = true;
                 /* system call */
                 if (env->thumb) {
                     /* Thumb is always EABI style with syscall number in r7 */
@@ -382,7 +382,7 @@ void cpu_loop(CPUARMState *env)
                          * > 0xfffff and are handled below as out-of-range.
                          */
                         n ^= ARM_SYSCALL_BASE;
-                        env->eabi = 0;
+                        env->eabi = false;
                     }
                 }
 
@@ -449,7 +449,7 @@ void cpu_loop(CPUARMState *env)
             }
             break;
         case EXCP_SEMIHOST:
-            env->regs[0] = do_common_semihosting(cs);
+            do_common_semihosting(cs);
             env->regs[15] += env->thumb ? 2 : 4;
             break;
         case EXCP_INTERRUPT:

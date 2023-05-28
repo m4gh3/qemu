@@ -19,7 +19,9 @@
 
 #include "qemu/osdep.h"
 
+#include "block/block_int.h"
 #include "block/export.h"
+#include "block/dirty-bitmap.h"
 #include "qapi/error.h"
 #include "qemu/queue.h"
 #include "trace.h"
@@ -1407,8 +1409,8 @@ nbd_read_eof(NBDClient *client, void *buffer, size_t size, Error **errp)
     return 1;
 }
 
-static int nbd_receive_request(NBDClient *client, NBDRequest *request,
-                               Error **errp)
+static int coroutine_fn nbd_receive_request(NBDClient *client, NBDRequest *request,
+                                            Error **errp)
 {
     uint8_t buf[NBD_REQUEST_SIZE];
     uint32_t magic;
@@ -1597,8 +1599,7 @@ static bool nbd_drained_poll(void *opaque)
              * enter it here so we don't depend on the client to wake it up.
              */
             if (client->recv_coroutine != NULL && client->read_yielding) {
-                qemu_aio_coroutine_enter(exp->common.ctx,
-                                         client->recv_coroutine);
+                qio_channel_wake_read(client->ioc);
             }
 
             return true;
@@ -1638,6 +1639,7 @@ static int nbd_export_create(BlockExport *blk_exp, BlockExportOptions *exp_args,
 {
     NBDExport *exp = container_of(blk_exp, NBDExport, common);
     BlockExportOptionsNbd *arg = &exp_args->u.nbd;
+    const char *name = arg->name ?: exp_args->node_name;
     BlockBackend *blk = blk_exp->blk;
     int64_t size;
     uint64_t perm, shared_perm;
@@ -1653,12 +1655,8 @@ static int nbd_export_create(BlockExport *blk_exp, BlockExportOptions *exp_args,
         return -EINVAL;
     }
 
-    if (!arg->has_name) {
-        arg->name = exp_args->node_name;
-    }
-
-    if (strlen(arg->name) > NBD_MAX_STRING_SIZE) {
-        error_setg(errp, "export name '%s' too long", arg->name);
+    if (strlen(name) > NBD_MAX_STRING_SIZE) {
+        error_setg(errp, "export name '%s' too long", name);
         return -EINVAL;
     }
 
@@ -1667,8 +1665,8 @@ static int nbd_export_create(BlockExport *blk_exp, BlockExportOptions *exp_args,
         return -EINVAL;
     }
 
-    if (nbd_export_find(arg->name)) {
-        error_setg(errp, "NBD server already has export named '%s'", arg->name);
+    if (nbd_export_find(name)) {
+        error_setg(errp, "NBD server already has export named '%s'", name);
         return -EEXIST;
     }
 
@@ -1688,7 +1686,7 @@ static int nbd_export_create(BlockExport *blk_exp, BlockExportOptions *exp_args,
     }
 
     QTAILQ_INIT(&exp->clients);
-    exp->name = g_strdup(arg->name);
+    exp->name = g_strdup(name);
     exp->description = g_strdup(arg->description);
     exp->nbdflags = (NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH |
                      NBD_FLAG_SEND_FUA | NBD_FLAG_SEND_CACHE);
@@ -1848,15 +1846,13 @@ static void nbd_export_delete(BlockExport *blk_exp)
     g_free(exp->description);
     exp->description = NULL;
 
-    if (exp->common.blk) {
-        if (exp->eject_notifier_blk) {
-            notifier_remove(&exp->eject_notifier);
-            blk_unref(exp->eject_notifier_blk);
-        }
-        blk_remove_aio_context_notifier(exp->common.blk, blk_aio_attached,
-                                        blk_aio_detach, exp);
-        blk_set_disable_request_queuing(exp->common.blk, false);
+    if (exp->eject_notifier_blk) {
+        notifier_remove(&exp->eject_notifier);
+        blk_unref(exp->eject_notifier_blk);
     }
+    blk_remove_aio_context_notifier(exp->common.blk, blk_aio_attached,
+                                    blk_aio_detach, exp);
+    blk_set_disable_request_queuing(exp->common.blk, false);
 
     for (i = 0; i < exp->nr_export_bitmaps; i++) {
         bdrv_dirty_bitmap_set_busy(exp->export_bitmaps[i], false);
@@ -1896,12 +1892,12 @@ static inline void set_be_simple_reply(NBDSimpleReply *reply, uint64_t error,
     stq_be_p(&reply->handle, handle);
 }
 
-static int nbd_co_send_simple_reply(NBDClient *client,
-                                    uint64_t handle,
-                                    uint32_t error,
-                                    void *data,
-                                    size_t len,
-                                    Error **errp)
+static int coroutine_fn nbd_co_send_simple_reply(NBDClient *client,
+                                                 uint64_t handle,
+                                                 uint32_t error,
+                                                 void *data,
+                                                 size_t len,
+                                                 Error **errp)
 {
     NBDSimpleReply reply;
     int nbd_err = system_errno_to_nbd_errno(error);
@@ -1991,7 +1987,7 @@ static int coroutine_fn nbd_co_send_structured_error(NBDClient *client,
 }
 
 /* Do a sparse read and send the structured reply to the client.
- * Returns -errno if sending fails. bdrv_block_status_above() failure is
+ * Returns -errno if sending fails. blk_co_block_status_above() failure is
  * reported to the client, at which point this function succeeds.
  */
 static int coroutine_fn nbd_co_send_sparse_read(NBDClient *client,
@@ -2007,10 +2003,10 @@ static int coroutine_fn nbd_co_send_sparse_read(NBDClient *client,
 
     while (progress < size) {
         int64_t pnum;
-        int status = bdrv_block_status_above(blk_bs(exp->common.blk), NULL,
-                                             offset + progress,
-                                             size - progress, &pnum, NULL,
-                                             NULL);
+        int status = blk_co_block_status_above(exp->common.blk, NULL,
+                                               offset + progress,
+                                               size - progress, &pnum, NULL,
+                                               NULL);
         bool final;
 
         if (status < 0) {
@@ -2039,8 +2035,8 @@ static int coroutine_fn nbd_co_send_sparse_read(NBDClient *client,
             stl_be_p(&chunk.length, pnum);
             ret = nbd_co_send_iov(client, iov, 1, errp);
         } else {
-            ret = blk_pread(exp->common.blk, offset + progress,
-                            data + progress, pnum);
+            ret = blk_co_pread(exp->common.blk, offset + progress, pnum,
+                               data + progress, 0);
             if (ret < 0) {
                 error_setg_errno(errp, -ret, "reading from file failed");
                 break;
@@ -2141,14 +2137,15 @@ static int nbd_extent_array_add(NBDExtentArray *ea,
     return 0;
 }
 
-static int blockstatus_to_extents(BlockDriverState *bs, uint64_t offset,
-                                  uint64_t bytes, NBDExtentArray *ea)
+static int coroutine_fn blockstatus_to_extents(BlockBackend *blk,
+                                               uint64_t offset, uint64_t bytes,
+                                               NBDExtentArray *ea)
 {
     while (bytes) {
         uint32_t flags;
         int64_t num;
-        int ret = bdrv_block_status_above(bs, NULL, offset, bytes, &num,
-                                          NULL, NULL);
+        int ret = blk_co_block_status_above(blk, NULL, offset, bytes, &num,
+                                            NULL, NULL);
 
         if (ret < 0) {
             return ret;
@@ -2168,13 +2165,14 @@ static int blockstatus_to_extents(BlockDriverState *bs, uint64_t offset,
     return 0;
 }
 
-static int blockalloc_to_extents(BlockDriverState *bs, uint64_t offset,
-                                 uint64_t bytes, NBDExtentArray *ea)
+static int coroutine_fn blockalloc_to_extents(BlockBackend *blk,
+                                              uint64_t offset, uint64_t bytes,
+                                              NBDExtentArray *ea)
 {
     while (bytes) {
         int64_t num;
-        int ret = bdrv_is_allocated_above(bs, NULL, false, offset, bytes,
-                                          &num);
+        int ret = blk_co_is_allocated_above(blk, NULL, false, offset, bytes,
+                                            &num);
 
         if (ret < 0) {
             return ret;
@@ -2197,9 +2195,9 @@ static int blockalloc_to_extents(BlockDriverState *bs, uint64_t offset,
  * @ea is converted to BE by the function
  * @last controls whether NBD_REPLY_FLAG_DONE is sent.
  */
-static int nbd_co_send_extents(NBDClient *client, uint64_t handle,
-                               NBDExtentArray *ea,
-                               bool last, uint32_t context_id, Error **errp)
+static int coroutine_fn
+nbd_co_send_extents(NBDClient *client, uint64_t handle, NBDExtentArray *ea,
+                    bool last, uint32_t context_id, Error **errp)
 {
     NBDStructuredMeta chunk;
     struct iovec iov[] = {
@@ -2220,20 +2218,21 @@ static int nbd_co_send_extents(NBDClient *client, uint64_t handle,
 }
 
 /* Get block status from the exported device and send it to the client */
-static int nbd_co_send_block_status(NBDClient *client, uint64_t handle,
-                                    BlockDriverState *bs, uint64_t offset,
-                                    uint32_t length, bool dont_fragment,
-                                    bool last, uint32_t context_id,
-                                    Error **errp)
+static int
+coroutine_fn nbd_co_send_block_status(NBDClient *client, uint64_t handle,
+                                      BlockBackend *blk, uint64_t offset,
+                                      uint32_t length, bool dont_fragment,
+                                      bool last, uint32_t context_id,
+                                      Error **errp)
 {
     int ret;
     unsigned int nb_extents = dont_fragment ? 1 : NBD_MAX_BLOCK_STATUS_EXTENTS;
     g_autoptr(NBDExtentArray) ea = nbd_extent_array_new(nb_extents);
 
     if (context_id == NBD_META_ID_BASE_ALLOCATION) {
-        ret = blockstatus_to_extents(bs, offset, length, ea);
+        ret = blockstatus_to_extents(blk, offset, length, ea);
     } else {
-        ret = blockalloc_to_extents(bs, offset, length, ea);
+        ret = blockalloc_to_extents(blk, offset, length, ea);
     }
     if (ret < 0) {
         return nbd_co_send_structured_error(
@@ -2275,10 +2274,10 @@ static void bitmap_to_extents(BdrvDirtyBitmap *bitmap,
     bdrv_dirty_bitmap_unlock(bitmap);
 }
 
-static int nbd_co_send_bitmap(NBDClient *client, uint64_t handle,
-                              BdrvDirtyBitmap *bitmap, uint64_t offset,
-                              uint32_t length, bool dont_fragment, bool last,
-                              uint32_t context_id, Error **errp)
+static int coroutine_fn nbd_co_send_bitmap(NBDClient *client, uint64_t handle,
+                                           BdrvDirtyBitmap *bitmap, uint64_t offset,
+                                           uint32_t length, bool dont_fragment, bool last,
+                                           uint32_t context_id, Error **errp)
 {
     unsigned int nb_extents = dont_fragment ? 1 : NBD_MAX_BLOCK_STATUS_EXTENTS;
     g_autoptr(NBDExtentArray) ea = nbd_extent_array_new(nb_extents);
@@ -2295,8 +2294,8 @@ static int nbd_co_send_bitmap(NBDClient *client, uint64_t handle,
  * to the client (although the caller may still need to disconnect after
  * reporting the error).
  */
-static int nbd_co_receive_request(NBDRequestData *req, NBDRequest *request,
-                                  Error **errp)
+static int coroutine_fn nbd_co_receive_request(NBDRequestData *req, NBDRequest *request,
+                                               Error **errp)
 {
     NBDClient *client = req->client;
     int valid_flags;
@@ -2444,7 +2443,7 @@ static coroutine_fn int nbd_do_cmd_read(NBDClient *client, NBDRequest *request,
                                        data, request->len, errp);
     }
 
-    ret = blk_pread(exp->common.blk, request->from, data, request->len);
+    ret = blk_co_pread(exp->common.blk, request->from, request->len, data, 0);
     if (ret < 0) {
         return nbd_send_generic_reply(client, request->handle, ret,
                                       "reading from file failed", errp);
@@ -2511,8 +2510,8 @@ static coroutine_fn int nbd_handle_request(NBDClient *client,
         if (request->flags & NBD_CMD_FLAG_FUA) {
             flags |= BDRV_REQ_FUA;
         }
-        ret = blk_pwrite(exp->common.blk, request->from, data, request->len,
-                         flags);
+        ret = blk_co_pwrite(exp->common.blk, request->from, request->len, data,
+                            flags);
         return nbd_send_generic_reply(client, request->handle, ret,
                                       "writing to file failed", errp);
 
@@ -2527,8 +2526,8 @@ static coroutine_fn int nbd_handle_request(NBDClient *client,
         if (request->flags & NBD_CMD_FLAG_FAST_ZERO) {
             flags |= BDRV_REQ_NO_FALLBACK;
         }
-        ret = blk_pwrite_zeroes(exp->common.blk, request->from, request->len,
-                                flags);
+        ret = blk_co_pwrite_zeroes(exp->common.blk, request->from, request->len,
+                                   flags);
         return nbd_send_generic_reply(client, request->handle, ret,
                                       "writing to file failed", errp);
 
@@ -2560,7 +2559,7 @@ static coroutine_fn int nbd_handle_request(NBDClient *client,
 
             if (client->export_meta.base_allocation) {
                 ret = nbd_co_send_block_status(client, request->handle,
-                                               blk_bs(exp->common.blk),
+                                               exp->common.blk,
                                                request->from,
                                                request->len, dont_fragment,
                                                !--contexts_remaining,
@@ -2573,7 +2572,7 @@ static coroutine_fn int nbd_handle_request(NBDClient *client,
 
             if (client->export_meta.allocation_depth) {
                 ret = nbd_co_send_block_status(client, request->handle,
-                                               blk_bs(exp->common.blk),
+                                               exp->common.blk,
                                                request->from, request->len,
                                                dont_fragment,
                                                !--contexts_remaining,
@@ -2665,6 +2664,8 @@ static coroutine_fn void nbd_trip(void *opaque)
         goto disconnect;
     }
 
+    qio_channel_set_cork(client->ioc, true);
+
     if (ret < 0) {
         /* It wasn't -EIO, so, according to nbd_co_receive_request()
          * semantics, we should return the error to the client. */
@@ -2690,6 +2691,7 @@ static coroutine_fn void nbd_trip(void *opaque)
         goto disconnect;
     }
 
+    qio_channel_set_cork(client->ioc, false);
 done:
     nbd_request_put(req);
     nbd_client_put(client);
@@ -2753,6 +2755,7 @@ void nbd_client_new(QIOChannelSocket *sioc,
     }
     client->tlsauthz = g_strdup(tlsauthz);
     client->sioc = sioc;
+    qio_channel_set_delay(QIO_CHANNEL(sioc), false);
     object_ref(OBJECT(client->sioc));
     client->ioc = QIO_CHANNEL(sioc);
     object_ref(OBJECT(client->ioc));

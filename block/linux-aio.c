@@ -16,6 +16,9 @@
 #include "qemu/coroutine.h"
 #include "qapi/error.h"
 
+/* Only used for assertions.  */
+#include "qemu/coroutine_int.h"
+
 #include <libaio.h>
 
 /*
@@ -56,10 +59,8 @@ struct LinuxAioState {
     io_context_t ctx;
     EventNotifier e;
 
-    /* io queue for submit at batch.  Protected by AioContext lock. */
+    /* No locking required, only accessed from AioContext home thread */
     LaioQueue io_q;
-
-    /* I/O completion processing.  Only runs in I/O thread.  */
     QEMUBH *completion_bh;
     int event_idx;
     int event_max;
@@ -102,6 +103,7 @@ static void qemu_laio_process_completion(struct qemu_laiocb *laiocb)
      * later.  Coroutines cannot be entered recursively so avoid doing
      * that!
      */
+    assert(laiocb->co->ctx == laiocb->ctx->aio_context);
     if (!qemu_coroutine_entered(laiocb->co)) {
         aio_co_wake(laiocb->co);
     }
@@ -232,13 +234,11 @@ static void qemu_laio_process_completions(LinuxAioState *s)
 
 static void qemu_laio_process_completions_and_submit(LinuxAioState *s)
 {
-    aio_context_acquire(s->aio_context);
     qemu_laio_process_completions(s);
 
     if (!s->io_q.plugged && !QSIMPLEQ_EMPTY(&s->io_q.pending)) {
         ioq_submit(s);
     }
-    aio_context_release(s->aio_context);
 }
 
 static void qemu_laio_completion_bh(void *opaque)
@@ -354,17 +354,30 @@ static uint64_t laio_max_batch(LinuxAioState *s, uint64_t dev_max_batch)
     return max_batch;
 }
 
-void laio_io_plug(BlockDriverState *bs, LinuxAioState *s)
+void laio_io_plug(void)
 {
+    AioContext *ctx = qemu_get_current_aio_context();
+    LinuxAioState *s = aio_get_linux_aio(ctx);
+
     s->io_q.plugged++;
 }
 
-void laio_io_unplug(BlockDriverState *bs, LinuxAioState *s,
-                    uint64_t dev_max_batch)
+void laio_io_unplug(uint64_t dev_max_batch)
 {
+    AioContext *ctx = qemu_get_current_aio_context();
+    LinuxAioState *s = aio_get_linux_aio(ctx);
+
     assert(s->io_q.plugged);
+    s->io_q.plugged--;
+
+    /*
+     * Why max batch checking is performed here:
+     * Another BDS may have queued requests with a higher dev_max_batch and
+     * therefore in_queue could now exceed our dev_max_batch. Re-check the max
+     * batch so we can honor our device's dev_max_batch.
+     */
     if (s->io_q.in_queue >= laio_max_batch(s, dev_max_batch) ||
-        (--s->io_q.plugged == 0 &&
+        (!s->io_q.plugged &&
          !s->io_q.blocked && !QSIMPLEQ_EMPTY(&s->io_q.pending))) {
         ioq_submit(s);
     }
@@ -379,6 +392,9 @@ static int laio_do_submit(int fd, struct qemu_laiocb *laiocb, off_t offset,
 
     switch (type) {
     case QEMU_AIO_WRITE:
+        io_prep_pwritev(iocbs, fd, qiov->iov, qiov->niov, offset);
+        break;
+    case QEMU_AIO_ZONE_APPEND:
         io_prep_pwritev(iocbs, fd, qiov->iov, qiov->niov, offset);
         break;
     case QEMU_AIO_READ:
@@ -403,15 +419,15 @@ static int laio_do_submit(int fd, struct qemu_laiocb *laiocb, off_t offset,
     return 0;
 }
 
-int coroutine_fn laio_co_submit(BlockDriverState *bs, LinuxAioState *s, int fd,
-                                uint64_t offset, QEMUIOVector *qiov, int type,
-                                uint64_t dev_max_batch)
+int coroutine_fn laio_co_submit(int fd, uint64_t offset, QEMUIOVector *qiov,
+                                int type, uint64_t dev_max_batch)
 {
     int ret;
+    AioContext *ctx = qemu_get_current_aio_context();
     struct qemu_laiocb laiocb = {
         .co         = qemu_coroutine_self(),
         .nbytes     = qiov->size,
-        .ctx        = s,
+        .ctx        = aio_get_linux_aio(ctx),
         .ret        = -EINPROGRESS,
         .is_read    = (type == QEMU_AIO_READ),
         .qiov       = qiov,
@@ -453,7 +469,7 @@ LinuxAioState *laio_init(Error **errp)
     s = g_malloc0(sizeof(*s));
     rc = event_notifier_init(&s->e, false);
     if (rc < 0) {
-        error_setg_errno(errp, -rc, "failed to to initialize event notifier");
+        error_setg_errno(errp, -rc, "failed to initialize event notifier");
         goto out_free_state;
     }
 

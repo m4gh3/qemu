@@ -141,9 +141,15 @@ static uint64_t mdev_reg_read(void *opaque, hwaddr offset, unsigned size)
     return retval;
 }
 
+static void ro_reg_write(void *opaque, hwaddr offset, uint64_t value,
+                           unsigned size)
+{
+    /* Many register sets are read only */
+}
+
 static const MemoryRegionOps mdev_ops = {
     .read = mdev_reg_read,
-    .write = NULL, /* memory device register is read only */
+    .write = ro_reg_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
         .min_access_size = 1,
@@ -173,7 +179,7 @@ static const MemoryRegionOps mailbox_ops = {
 
 static const MemoryRegionOps dev_ops = {
     .read = dev_reg_read,
-    .write = NULL, /* status register is read only */
+    .write = ro_reg_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
         .min_access_size = 1,
@@ -188,7 +194,7 @@ static const MemoryRegionOps dev_ops = {
 
 static const MemoryRegionOps caps_ops = {
     .read = caps_reg_read,
-    .write = NULL, /* caps registers are read only */
+    .write = ro_reg_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
         .min_access_size = 1,
@@ -261,5 +267,20 @@ void cxl_device_register_init_common(CXLDeviceState *cxl_dstate)
     cxl_device_cap_init(cxl_dstate, MEMORY_DEVICE, 0x4000);
     memdev_reg_init_common(cxl_dstate);
 
-    assert(cxl_initialize_mailbox(cxl_dstate) == 0);
+    cxl_initialize_mailbox(cxl_dstate);
+}
+
+uint64_t cxl_device_get_timestamp(CXLDeviceState *cxl_dstate)
+{
+    uint64_t time, delta;
+    uint64_t final_time = 0;
+
+    if (cxl_dstate->timestamp.set) {
+        /* Find the delta from the last time the host set the time. */
+        time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        delta = time - cxl_dstate->timestamp.last_set;
+        final_time = cxl_dstate->timestamp.host_set + delta;
+    }
+
+    return final_time;
 }

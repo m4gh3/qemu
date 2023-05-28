@@ -119,9 +119,10 @@ def build_params(arg_type: Optional[QAPISchemaObjectType],
     elif arg_type:
         assert not arg_type.variants
         for memb in arg_type.members:
+            assert not memb.ifcond.is_present()
             ret += sep
             sep = ', '
-            if memb.optional:
+            if memb.need_has():
                 ret += 'bool has_%s, ' % c_name(memb.name)
             ret += '%s %s' % (memb.type.c_param_type(),
                               c_name(memb.name))

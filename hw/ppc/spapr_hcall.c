@@ -8,6 +8,7 @@
 #include "qemu/module.h"
 #include "qemu/error-report.h"
 #include "exec/exec-all.h"
+#include "exec/tb-flush.h"
 #include "helper_regs.h"
 #include "hw/ppc/ppc.h"
 #include "hw/ppc/spapr.h"
@@ -490,6 +491,7 @@ static target_ulong h_cede(PowerPCCPU *cpu, SpaprMachineState *spapr,
 
     env->msr |= (1ULL << MSR_EE);
     hreg_compute_hflags(env);
+    ppc_maybe_interrupt(env);
 
     if (spapr_cpu->prod) {
         spapr_cpu->prod = false;
@@ -500,6 +502,7 @@ static target_ulong h_cede(PowerPCCPU *cpu, SpaprMachineState *spapr,
         cs->halted = 1;
         cs->exception_index = EXCP_HLT;
         cs->exit_request = 1;
+        ppc_maybe_interrupt(env);
     }
 
     return H_SUCCESS;
@@ -521,6 +524,7 @@ static target_ulong h_confer_self(PowerPCCPU *cpu)
     cs->halted = 1;
     cs->exception_index = EXCP_HALTED;
     cs->exit_request = 1;
+    ppc_maybe_interrupt(&cpu->env);
 
     return H_SUCCESS;
 }
@@ -633,6 +637,7 @@ static target_ulong h_prod(PowerPCCPU *cpu, SpaprMachineState *spapr,
     spapr_cpu = spapr_cpu_state(tcpu);
     spapr_cpu->prod = true;
     cs->halted = 0;
+    ppc_maybe_interrupt(&cpu->env);
     qemu_cpu_kick(cs);
 
     return H_SUCCESS;
@@ -920,6 +925,7 @@ static target_ulong h_register_process_table(PowerPCCPU *cpu,
     target_ulong page_size = args[2];
     target_ulong table_size = args[3];
     target_ulong update_lpcr = 0;
+    target_ulong table_byte_size;
     uint64_t cproc;
 
     if (flags & ~FLAGS_MASK) { /* Check no reserved bits are set */
@@ -927,6 +933,14 @@ static target_ulong h_register_process_table(PowerPCCPU *cpu,
     }
     if (flags & FLAG_MODIFY) {
         if (flags & FLAG_REGISTER) {
+            /* Check process table alignment */
+            table_byte_size = 1ULL << (table_size + 12);
+            if (proc_tbl & (table_byte_size - 1)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                    "%s: process table not properly aligned: proc_tbl 0x"
+                    TARGET_FMT_lx" proc_tbl_size 0x"TARGET_FMT_lx"\n",
+                    __func__, proc_tbl, table_byte_size);
+            }
             if (flags & FLAG_RADIX) { /* Register new RADIX process table */
                 if (proc_tbl & 0xfff || proc_tbl >> 60) {
                     return H_P2;
@@ -1247,6 +1261,14 @@ target_ulong do_client_architecture_support(PowerPCCPU *cpu,
     spapr->fdt_initial_size = spapr->fdt_size;
     spapr->fdt_blob = fdt;
 
+    /*
+     * Set the machine->fdt pointer again since we just freed
+     * it above (by freeing spapr->fdt_blob). We set this
+     * pointer to enable support for the 'dumpdtb' QMP/HMP
+     * command.
+     */
+    MACHINE(spapr)->fdt = fdt;
+
     return H_SUCCESS;
 }
 
@@ -1544,8 +1566,6 @@ static target_ulong h_enter_nested(PowerPCCPU *cpu,
     struct kvmppc_hv_guest_state hv_state;
     struct kvmppc_pt_regs *regs;
     hwaddr len;
-    uint64_t cr;
-    int i;
 
     if (spapr->nested_ptcr == 0) {
         return H_NOT_AVAILABLE;
@@ -1594,12 +1614,7 @@ static target_ulong h_enter_nested(PowerPCCPU *cpu,
     env->lr = regs->link;
     env->ctr = regs->ctr;
     cpu_write_xer(env, regs->xer);
-
-    cr = regs->ccr;
-    for (i = 7; i >= 0; i--) {
-        env->crf[i] = cr & 15;
-        cr >>= 4;
-    }
+    ppc_set_cr(env, regs->ccr);
 
     env->msr = regs->msr;
     env->nip = regs->nip;
@@ -1652,6 +1667,7 @@ static target_ulong h_enter_nested(PowerPCCPU *cpu,
     spapr_cpu->in_nested = true;
 
     hreg_compute_hflags(env);
+    ppc_maybe_interrupt(env);
     tlb_flush(cs);
     env->reserve_addr = -1; /* Reset the reservation */
 
@@ -1675,8 +1691,6 @@ void spapr_exit_nested(PowerPCCPU *cpu, int excp)
     struct kvmppc_hv_guest_state *hvstate;
     struct kvmppc_pt_regs *regs;
     hwaddr len;
-    uint64_t cr;
-    int i;
 
     assert(spapr_cpu->in_nested);
 
@@ -1734,12 +1748,7 @@ void spapr_exit_nested(PowerPCCPU *cpu, int excp)
     regs->link = env->lr;
     regs->ctr = env->ctr;
     regs->xer = cpu_read_xer(env);
-
-    cr = 0;
-    for (i = 0; i < 8; i++) {
-        cr |= (env->crf[i] & 15) << (4 * (7 - i));
-    }
-    regs->ccr = cr;
+    regs->ccr = ppc_get_cr(env);
 
     if (excp == POWERPC_EXCP_MCHECK ||
         excp == POWERPC_EXCP_RESET ||
@@ -1793,6 +1802,7 @@ out_restore_l1:
     spapr_cpu->in_nested = false;
 
     hreg_compute_hflags(env);
+    ppc_maybe_interrupt(env);
     tlb_flush(cs);
     env->reserve_addr = -1; /* Reset the reservation */
 

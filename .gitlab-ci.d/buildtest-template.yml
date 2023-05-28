@@ -1,24 +1,19 @@
 .native_build_job_template:
+  extends: .base_job_template
   stage: build
   image: $CI_REGISTRY_IMAGE/qemu/$IMAGE:latest
   before_script:
     - JOBS=$(expr $(nproc) + 1)
   script:
-    - if test -n "$LD_JOBS";
-      then
-        scripts/git-submodule.sh update meson ;
-      fi
     - mkdir build
     - cd build
-    - if test -n "$TARGETS";
-      then
-        ../configure --enable-werror --disable-docs ${LD_JOBS:+--meson=git} $CONFIGURE_ARGS --target-list="$TARGETS" ;
-      else
-        ../configure --enable-werror --disable-docs ${LD_JOBS:+--meson=git} $CONFIGURE_ARGS ;
-      fi || { cat config.log meson-logs/meson-log.txt && exit 1; }
+    - ../configure --enable-werror --disable-docs --enable-fdt=system
+          ${TARGETS:+--target-list="$TARGETS"}
+          $CONFIGURE_ARGS ||
+      { cat config.log meson-logs/meson-log.txt && exit 1; }
     - if test -n "$LD_JOBS";
       then
-        ../meson/meson.py configure . -Dbackend_max_links="$LD_JOBS" ;
+        pyvenv/bin/meson configure . -Dbackend_max_links="$LD_JOBS" ;
       fi || exit 1;
     - make -j"$JOBS"
     - if test -n "$MAKE_CHECK_ARGS";
@@ -26,7 +21,24 @@
         make -j"$JOBS" $MAKE_CHECK_ARGS ;
       fi
 
+# We jump some hoops in common_test_job_template to avoid
+# rebuilding all the object files we skip in the artifacts
+.native_build_artifact_template:
+  artifacts:
+    expire_in: 2 days
+    paths:
+      - build
+      - .git-submodule-status
+    exclude:
+      - build/**/*.p
+      - build/**/*.a.p
+      - build/**/*.fa.p
+      - build/**/*.c.o
+      - build/**/*.c.o.d
+      - build/**/*.fa
+
 .common_test_job_template:
+  extends: .base_job_template
   stage: test
   image: $CI_REGISTRY_IMAGE/qemu/$IMAGE:latest
   script:
@@ -44,6 +56,8 @@
     expire_in: 7 days
     paths:
       - build/meson-logs/testlog.txt
+    reports:
+      junit: build/meson-logs/testlog.junit.xml
 
 .avocado_test_job_template:
   extends: .common_test_job_template
@@ -75,15 +89,5 @@
   after_script:
     - cd build
     - du -chs ${CI_PROJECT_DIR}/avocado-cache
-  rules:
-    # Only run these jobs if running on the mainstream namespace,
-    # or if the user set the QEMU_CI_AVOCADO_TESTING variable (either
-    # in its namespace setting or via git-push option, see documentation
-    # in /.gitlab-ci.yml of this repository).
-    - if: '$CI_PROJECT_NAMESPACE == "qemu-project"'
-      when: on_success
-    - if: '$QEMU_CI_AVOCADO_TESTING'
-      when: on_success
-    # Otherwise, set to manual (the jobs are created but not run).
-    - when: manual
-      allow_failure: true
+  variables:
+    QEMU_JOB_AVOCADO: 1

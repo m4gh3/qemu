@@ -1,20 +1,30 @@
 softmmu_ss.add(files(
   'announce.c',
   'checksum.c',
-  'colo-compare.c',
-  'colo.c',
   'dump.c',
   'eth.c',
   'filter-buffer.c',
   'filter-mirror.c',
-  'filter-rewriter.c',
   'filter.c',
   'hub.c',
+  'net-hmp-cmds.c',
   'net.c',
   'queue.c',
   'socket.c',
+  'stream.c',
+  'dgram.c',
   'util.c',
 ))
+
+if get_option('replication').allowed() or \
+    get_option('colo_proxy').allowed()
+  softmmu_ss.add(files('colo-compare.c'))
+  softmmu_ss.add(files('colo.c'))
+endif
+
+if get_option('colo_proxy').allowed()
+  softmmu_ss.add(files('filter-rewriter.c'))
+endif
 
 softmmu_ss.add(when: 'CONFIG_TCG', if_true: files('filter-replay.c'))
 
@@ -41,7 +51,8 @@ endif
 softmmu_ss.add(when: 'CONFIG_POSIX', if_true: files(tap_posix))
 softmmu_ss.add(when: 'CONFIG_WIN32', if_true: files('tap-win32.c'))
 if have_vhost_net_vdpa
-  softmmu_ss.add(files('vhost-vdpa.c'))
+  softmmu_ss.add(when: 'CONFIG_VIRTIO_NET', if_true: files('vhost-vdpa.c'), if_false: files('vhost-vdpa-stub.c'))
+  softmmu_ss.add(when: 'CONFIG_ALL', if_true: files('vhost-vdpa-stub.c'))
 endif
 
 vmnet_files = files(

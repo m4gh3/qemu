@@ -12,7 +12,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/option.h"
-#include "qapi/qmp/qerror.h"
+#include "qemu/accel.h"
 #include "sysemu/replay.h"
 #include "qemu/units.h"
 #include "hw/boards.h"
@@ -33,16 +33,36 @@
 #include "sysemu/qtest.h"
 #include "hw/pci/pci.h"
 #include "hw/mem/nvdimm.h"
-#include "hw/cxl/cxl.h"
 #include "migration/global_state.h"
 #include "migration/vmstate.h"
 #include "exec/confidential-guest-support.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-pci.h"
-#include "qom/object_interfaces.h"
+
+GlobalProperty hw_compat_8_0[] = {
+    { "migration", "multifd-flush-after-each-section", "on"},
+};
+const size_t hw_compat_8_0_len = G_N_ELEMENTS(hw_compat_8_0);
+
+GlobalProperty hw_compat_7_2[] = {
+    { "e1000e", "migrate-timadj", "off" },
+    { "virtio-mem", "x-early-migration", "false" },
+    { "migration", "x-preempt-pre-7-2", "true" },
+    { TYPE_PCI_DEVICE, "x-pcie-err-unc-mask", "off" },
+};
+const size_t hw_compat_7_2_len = G_N_ELEMENTS(hw_compat_7_2);
+
+GlobalProperty hw_compat_7_1[] = {
+    { "virtio-device", "queue_reset", "false" },
+    { "virtio-rng-pci", "vectors", "0" },
+    { "virtio-rng-pci-transitional", "vectors", "0" },
+    { "virtio-rng-pci-non-transitional", "vectors", "0" },
+};
+const size_t hw_compat_7_1_len = G_N_ELEMENTS(hw_compat_7_1);
 
 GlobalProperty hw_compat_7_0[] = {
     { "arm-gicv3-common", "force-8-bit-prio", "on" },
+    { "nvme-ns", "eui64-default", "on"},
 };
 const size_t hw_compat_7_0_len = G_N_ELEMENTS(hw_compat_7_0);
 
@@ -549,11 +569,10 @@ static void machine_get_mem(Object *obj, Visitor *v, const char *name,
 static void machine_set_mem(Object *obj, Visitor *v, const char *name,
                             void *opaque, Error **errp)
 {
+    ERRP_GUARD();
     MachineState *ms = MACHINE(obj);
     MachineClass *mc = MACHINE_GET_CLASS(obj);
     MemorySizeConfiguration *mem;
-
-    ERRP_GUARD();
 
     if (!visit_type_MemorySizeConfiguration(v, name, &mem, errp)) {
         return;
@@ -628,20 +647,6 @@ static void machine_set_nvdimm_persistence(Object *obj, const char *value,
     nvdimms_state->persistence_string = g_strdup(value);
 }
 
-static bool machine_get_cxl(Object *obj, Error **errp)
-{
-    MachineState *ms = MACHINE(obj);
-
-    return ms->cxl_devices_state->is_enabled;
-}
-
-static void machine_set_cxl(Object *obj, bool value, Error **errp)
-{
-    MachineState *ms = MACHINE(obj);
-
-    ms->cxl_devices_state->is_enabled = value;
-}
-
 void machine_class_allow_dynamic_sysbus_dev(MachineClass *mc, const char *type)
 {
     QAPI_LIST_PREPEND(mc->allowed_dynamic_sysbus_devices, g_strdup(type));
@@ -693,7 +698,6 @@ HotpluggableCPUList *machine_query_hotpluggable_cpus(MachineState *machine)
 
         cpu = machine->possible_cpus->cpus[i].cpu;
         if (cpu) {
-            cpu_item->has_qom_path = true;
             cpu_item->qom_path = object_get_canonical_path(cpu);
         }
         QAPI_LIST_PREPEND(head, cpu_item);
@@ -882,8 +886,7 @@ static void machine_copy_boot_config(MachineState *ms, BootConfiguration *config
 
     machine_free_boot_config(ms);
     ms->boot_config = *config;
-    if (!config->has_order) {
-        ms->boot_config.has_order = true;
+    if (!config->order) {
         ms->boot_config.order = g_strdup(machine_class->default_boot_order);
     }
 }
@@ -898,13 +901,13 @@ static void machine_set_boot(Object *obj, Visitor *v, const char *name,
     if (!visit_type_BootConfiguration(v, name, &config, errp)) {
         return;
     }
-    if (config->has_order) {
+    if (config->order) {
         validate_bootdevices(config->order, errp);
         if (*errp) {
             goto out_free;
         }
     }
-    if (config->has_once) {
+    if (config->once) {
         validate_bootdevices(config->once, errp);
         if (*errp) {
             goto out_free;
@@ -928,8 +931,6 @@ static void machine_class_init(ObjectClass *oc, void *data)
     mc->default_ram_size = 128 * MiB;
     mc->rom_file_has_mr = true;
 
-    /* Few machines support CXL, so default to off */
-    mc->cxl_supported = false;
     /* numa node memory size aligned on 8MB by default.
      * On Linux, each node's border has to be 8MB aligned
      */
@@ -1090,16 +1091,6 @@ static void machine_initfn(Object *obj)
                                         "Valid values are cpu, mem-ctrl");
     }
 
-    if (mc->cxl_supported) {
-        Object *obj = OBJECT(ms);
-
-        ms->cxl_devices_state = g_new0(CXLState, 1);
-        object_property_add_bool(obj, "cxl", machine_get_cxl, machine_set_cxl);
-        object_property_set_description(obj, "cxl",
-                                        "Set on/off to enable/disable "
-                                        "CXL instantiation");
-    }
-
     if (mc->cpu_index_to_instance_props && mc->get_default_cpu_node_id) {
         ms->numa_state = g_new0(NumaState, 1);
         object_property_add_bool(obj, "hmat",
@@ -1137,7 +1128,6 @@ static void machine_finalize(Object *obj)
     g_free(ms->device_memory);
     g_free(ms->nvdimms_state);
     g_free(ms->numa_state);
-    g_free(ms->cxl_devices_state);
 }
 
 bool machine_usb(MachineState *machine)
@@ -1200,9 +1190,7 @@ static void numa_validate_initiator(NumaState *numa_state)
 
     for (i = 0; i < numa_state->num_nodes; i++) {
         if (numa_info[i].initiator == MAX_NODES) {
-            error_report("The initiator of NUMA node %d is missing, use "
-                         "'-numa node,initiator' option to declare it", i);
-            exit(1);
+            continue;
         }
 
         if (!numa_info[numa_info[i].initiator].present) {
@@ -1350,6 +1338,14 @@ void machine_run_board_init(MachineState *machine, const char *mem_path, Error *
         }
     } else if (machine_class->default_ram_id && machine->ram_size &&
                numa_uses_legacy_mem()) {
+        if (object_property_find(object_get_objects_root(),
+                                 machine_class->default_ram_id)) {
+            error_setg(errp, "object name '%s' is reserved for the default"
+                " RAM backend, it can't be used for any other purposes."
+                " Change the object's 'id' to something else",
+                machine_class->default_ram_id);
+            return;
+        }
         if (!create_default_memdev(current_machine, mem_path, errp)) {
             return;
         }
@@ -1448,7 +1444,7 @@ void qdev_machine_creation_done(void)
 {
     cpu_synchronize_all_post_init();
 
-    if (current_machine->boot_config.has_once) {
+    if (current_machine->boot_config.once) {
         qemu_boot_set(current_machine->boot_config.once, &error_fatal);
         qemu_register_reset(restore_boot_order, g_strdup(current_machine->boot_config.order));
     }

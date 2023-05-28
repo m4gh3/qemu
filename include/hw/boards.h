@@ -6,7 +6,6 @@
 #include "exec/memory.h"
 #include "sysemu/hostmem.h"
 #include "sysemu/blockdev.h"
-#include "qemu/accel.h"
 #include "qapi/qapi-types-machine.h"
 #include "qemu/module.h"
 #include "qom/object.h"
@@ -130,11 +129,14 @@ typedef struct {
  * @prefer_sockets - whether sockets are preferred over cores in smp parsing
  * @dies_supported - whether dies are supported by the machine
  * @clusters_supported - whether clusters are supported by the machine
+ * @has_clusters - whether clusters are explicitly specified in the user
+ *                 provided SMP configuration
  */
 typedef struct {
     bool prefer_sockets;
     bool dies_supported;
     bool clusters_supported;
+    bool has_clusters;
 } SMPCompatProps;
 
 /**
@@ -231,7 +233,7 @@ struct MachineClass {
     const char *deprecation_reason;
 
     void (*init)(MachineState *state);
-    void (*reset)(MachineState *state);
+    void (*reset)(MachineState *state, ShutdownCause reason);
     void (*wakeup)(MachineState *state);
     int (*kvm_type)(MachineState *machine, const char *arg);
 
@@ -251,6 +253,7 @@ struct MachineClass {
     const char *default_machine_opts;
     const char *default_boot_order;
     const char *default_display;
+    const char *default_nic;
     GPtrArray *compat_props;
     const char *hw_version;
     ram_addr_t default_ram_size;
@@ -269,7 +272,6 @@ struct MachineClass {
     bool ignore_boot_device_suffixes;
     bool smbus_no_migration_support;
     bool nvdimm_supported;
-    bool cxl_supported;
     bool numa_mem_supported;
     bool auto_enable_numa;
     SMPCompatProps smp_props;
@@ -291,10 +293,12 @@ struct MachineClass {
  * @base: address in guest physical address space where the memory
  * address space for memory devices starts
  * @mr: address space container for memory devices
+ * @dimm_size: the sum of plugged DIMMs' sizes
  */
 typedef struct DeviceMemoryState {
     hwaddr base;
     MemoryRegion mr;
+    uint64_t dimm_size;
 } DeviceMemoryState;
 
 /**
@@ -360,7 +364,6 @@ struct MachineState {
     CPUArchIdList *possible_cpus;
     CpuTopology smp;
     struct NVDIMMState *nvdimms_state;
-    struct CXLState *cxl_devices_state;
     struct NumaState *numa_state;
 };
 
@@ -380,6 +383,15 @@ struct MachineState {
         type_register_static(&machine_initfn##_typeinfo); \
     } \
     type_init(machine_initfn##_register_types)
+
+extern GlobalProperty hw_compat_8_0[];
+extern const size_t hw_compat_8_0_len;
+
+extern GlobalProperty hw_compat_7_2[];
+extern const size_t hw_compat_7_2_len;
+
+extern GlobalProperty hw_compat_7_1[];
+extern const size_t hw_compat_7_1_len;
 
 extern GlobalProperty hw_compat_7_0[];
 extern const size_t hw_compat_7_0_len;

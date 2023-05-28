@@ -81,9 +81,41 @@ void helper_set_rounding_mode(CPURISCVState *env, uint32_t rm)
     set_float_rounding_mode(softrm, &env->fp_status);
 }
 
-void helper_set_rod_rounding_mode(CPURISCVState *env)
+void helper_set_rounding_mode_chkfrm(CPURISCVState *env, uint32_t rm)
 {
-    set_float_rounding_mode(float_round_to_odd, &env->fp_status);
+    int softrm;
+
+    /* Always validate frm, even if rm != DYN. */
+    if (unlikely(env->frm >= 5)) {
+        riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, GETPC());
+    }
+    if (rm == RISCV_FRM_DYN) {
+        rm = env->frm;
+    }
+    switch (rm) {
+    case RISCV_FRM_RNE:
+        softrm = float_round_nearest_even;
+        break;
+    case RISCV_FRM_RTZ:
+        softrm = float_round_to_zero;
+        break;
+    case RISCV_FRM_RDN:
+        softrm = float_round_down;
+        break;
+    case RISCV_FRM_RUP:
+        softrm = float_round_up;
+        break;
+    case RISCV_FRM_RMM:
+        softrm = float_round_ties_away;
+        break;
+    case RISCV_FRM_ROD:
+        softrm = float_round_to_odd;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    set_float_rounding_mode(softrm, &env->fp_status);
 }
 
 static uint64_t do_fmadd_h(CPURISCVState *env, uint64_t rs1, uint64_t rs2,
@@ -216,8 +248,8 @@ uint64_t helper_fmin_s(CPURISCVState *env, uint64_t rs1, uint64_t rs2)
     float32 frs1 = check_nanbox_s(env, rs1);
     float32 frs2 = check_nanbox_s(env, rs2);
     return nanbox_s(env, env->priv_ver < PRIV_VERSION_1_11_0 ?
-                    float32_minnum(frs1, frs2, &env->fp_status) :
-                    float32_minimum_number(frs1, frs2, &env->fp_status));
+                         float32_minnum(frs1, frs2, &env->fp_status) :
+                         float32_minimum_number(frs1, frs2, &env->fp_status));
 }
 
 uint64_t helper_fmax_s(CPURISCVState *env, uint64_t rs1, uint64_t rs2)
@@ -225,8 +257,8 @@ uint64_t helper_fmax_s(CPURISCVState *env, uint64_t rs1, uint64_t rs2)
     float32 frs1 = check_nanbox_s(env, rs1);
     float32 frs2 = check_nanbox_s(env, rs2);
     return nanbox_s(env, env->priv_ver < PRIV_VERSION_1_11_0 ?
-                    float32_maxnum(frs1, frs2, &env->fp_status) :
-                    float32_maximum_number(frs1, frs2, &env->fp_status));
+                         float32_maxnum(frs1, frs2, &env->fp_status) :
+                         float32_maximum_number(frs1, frs2, &env->fp_status));
 }
 
 uint64_t helper_fsqrt_s(CPURISCVState *env, uint64_t rs1)
@@ -329,15 +361,15 @@ uint64_t helper_fdiv_d(CPURISCVState *env, uint64_t frs1, uint64_t frs2)
 uint64_t helper_fmin_d(CPURISCVState *env, uint64_t frs1, uint64_t frs2)
 {
     return env->priv_ver < PRIV_VERSION_1_11_0 ?
-            float64_minnum(frs1, frs2, &env->fp_status) :
-            float64_minimum_number(frs1, frs2, &env->fp_status);
+           float64_minnum(frs1, frs2, &env->fp_status) :
+           float64_minimum_number(frs1, frs2, &env->fp_status);
 }
 
 uint64_t helper_fmax_d(CPURISCVState *env, uint64_t frs1, uint64_t frs2)
 {
     return env->priv_ver < PRIV_VERSION_1_11_0 ?
-            float64_maxnum(frs1, frs2, &env->fp_status) :
-            float64_maximum_number(frs1, frs2, &env->fp_status);
+           float64_maxnum(frs1, frs2, &env->fp_status) :
+           float64_maximum_number(frs1, frs2, &env->fp_status);
 }
 
 uint64_t helper_fcvt_s_d(CPURISCVState *env, uint64_t rs1)
@@ -449,8 +481,8 @@ uint64_t helper_fmin_h(CPURISCVState *env, uint64_t rs1, uint64_t rs2)
     float16 frs1 = check_nanbox_h(env, rs1);
     float16 frs2 = check_nanbox_h(env, rs2);
     return nanbox_h(env, env->priv_ver < PRIV_VERSION_1_11_0 ?
-                    float16_minnum(frs1, frs2, &env->fp_status) :
-                    float16_minimum_number(frs1, frs2, &env->fp_status));
+                         float16_minnum(frs1, frs2, &env->fp_status) :
+                         float16_minimum_number(frs1, frs2, &env->fp_status));
 }
 
 uint64_t helper_fmax_h(CPURISCVState *env, uint64_t rs1, uint64_t rs2)
@@ -458,8 +490,8 @@ uint64_t helper_fmax_h(CPURISCVState *env, uint64_t rs1, uint64_t rs2)
     float16 frs1 = check_nanbox_h(env, rs1);
     float16 frs2 = check_nanbox_h(env, rs2);
     return nanbox_h(env, env->priv_ver < PRIV_VERSION_1_11_0 ?
-                    float16_maxnum(frs1, frs2, &env->fp_status) :
-                    float16_maximum_number(frs1, frs2, &env->fp_status));
+                         float16_maxnum(frs1, frs2, &env->fp_status) :
+                         float16_maximum_number(frs1, frs2, &env->fp_status));
 }
 
 uint64_t helper_fsqrt_h(CPURISCVState *env, uint64_t rs1)
